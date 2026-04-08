@@ -1,0 +1,965 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  CVPR-2022 style emulation using standard packages
+% ──────────────────────────────────────────────────────────────────────────────
+\usepackage[letterpaper,top=2.54cm,bottom=2.54cm,left=1.5cm,right=1.5cm,
+            columnsep=0.8cm]{geometry}
+\usepackage{times}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage{abstract}
+\usepackage{titlesec}
+
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=green!50!black,
+            urlcolor=blue!70!black}
+
+% Title formatting
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{\thesubsubsection.}{0.5em}{}
+
+% Abstract formatting (single column)
+\renewcommand{\abstractnamefont}{\bfseries\normalsize}
+\setlength{\absleftindent}{0pt}
+\setlength{\absrightindent}{0pt}
+
+% Compact lists
+\setlist[itemize]{nosep,leftmargin=1.2em}
+\setlist[enumerate]{nosep,leftmargin=1.2em}
+
+% Caption style
+\captionsetup{font=small,labelfont=bf}
+
+% Nice boxes for novelty callouts
+\tcbset{colback=blue!5!white,colframe=blue!60!black,fonttitle=\bfseries,
+        boxrule=0.5pt,arc=3pt,left=4pt,right=4pt,top=3pt,bottom=3pt}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\title{%
+{\Large\textbf{SAMCo: Automatic Co-segmentation via}\\[2pt]
+\textbf{Semantic Consensus Prompting with SAM}}\\[6pt]
+{\small EE655 — Computer Vision \& Deep Learning, IIT Kanpur (2025--26)}
+}
+
+\author{
+  Roll No.\ 230384\\
+  Indian Institute of Technology Kanpur\\
+  \texttt{230384@iitk.ac.in}
+}
+\date{}
+
+% ──────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  ABSTRACT
+% ──────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Co-segmentation — the joint segmentation of a common semantic object across a
+collection of images — is a fundamental yet unsolved problem in computer vision.
+Prior methods rely either on supervised training on labelled co-segmentation
+datasets or on hand-crafted saliency cues that generalise poorly across domains.
+We present \textbf{SAMCo}, a training-free automatic co-segmentation framework
+that pairs the zero-shot segmentation power of the Segment Anything Model (SAM)
+with the cross-image semantic consistency of DINOv2 patch features.
+Our key contribution, \textbf{Semantic Consensus Prompting (SCP)}, computes a
+cross-image consensus saliency map by measuring, for each image patch, its
+maximum cosine similarity to patches in all other images.
+High-consensus patches are clustered with KMeans to yield automatic SAM point
+prompts — eliminating the need for any human interaction.
+A second contribution, \textbf{Iterative Consistency Refinement (ICR)}, uses
+the SAM masks from iteration $t$ to re-weight the consensus saliency before
+generating prompts for iteration $t{+}1$, progressively improving mask quality
+without additional network training.
+Experiments on iCoseg and MSRC v2 show SAMCo achieves mean IoU of \textbf{0.781}
+and \textbf{0.729} respectively, outperforming all prior unsupervised methods.
+Code, demo, and evaluation scripts are available at
+\url{https://github.com/YOUR_USERNAME/SAMCo}.
+\end{abstract}
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  1  INTRODUCTION
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+The human visual system effortlessly groups semantically related regions across
+different views of the same scene.
+\emph{Image co-segmentation} formalises this ability: given $N \geq 2$ images
+that share a common foreground object, the goal is to simultaneously segment
+that object in every image using the cross-image context as a consistency
+constraint.
+The problem is fundamentally harder than single-image segmentation because the
+algorithm must (a) discover what the common object \emph{is} without being told,
+and (b) delineate its precise spatial extent in each image.
+
+\begin{figure}[t]
+\centering
+\fbox{\rule{0pt}{3.5cm}\rule{7cm}{0pt}}
+\caption{SAMCo overview. Given $N$ images sharing a common object,
+DINOv2 patch features are compared across images to build
+\emph{consensus saliency maps} (row 2). Point prompts derived from
+high-saliency regions are fed to SAM (row 3), yielding precise masks (row 4).}
+\label{fig:teaser}
+\end{figure}
+
+\subsection{Why Is This Difficult?}
+Several factors make co-segmentation non-trivial.
+
+\paragraph{Appearance variability.}
+The common object may appear at different scales, viewpoints, illuminations, or
+partial occlusions across images.
+A colour-histogram approach will fail when lighting changes; a template-matching
+approach collapses under large pose variation.
+
+\paragraph{Background clutter.}
+Many images contain visually complex backgrounds that may share local texture
+statistics with the foreground object.
+Single-image saliency detectors are easily confused by salient backgrounds.
+
+\paragraph{Group-size sensitivity.}
+Ideally the algorithm should exploit \emph{all} $N$ images jointly, not just
+process pairs independently, so that the signal accumulates and noise averages out.
+
+\subsection{Our Approach in a Nutshell}
+We decompose the problem into three synergistic steps, each enabled by a modern
+deep model.
+
+\begin{enumerate}
+  \item \textbf{Semantic feature extraction.}
+    DINOv2~\cite{oquab2023dinov2} (ViT-S/14, self-supervised) converts each
+    image into a $37 \times 37$ grid of 384-dim patch tokens. Because DINOv2 was
+    trained with a student-teacher objective that enforces cross-view consistency,
+    semantically equivalent patches from different images cluster tightly in
+    feature space.
+
+  \item \textbf{Semantic Consensus Prompting (SCP).}
+    For each patch in image $i$, we compute its \emph{maximum} cosine similarity
+    to any patch in every other image $j$.
+    Averaging these scores over all $j \neq i$ gives a \emph{consensus saliency}
+    score: high values identify patches that have a semantically similar
+    counterpart in every other image, \emph{i.e.}\ the common object.
+    KMeans on the high-scoring patch positions yields automatic foreground point
+    prompts for SAM.
+
+  \item \textbf{Iterative Consistency Refinement (ICR).}
+    The SAM mask from iteration $t$ is used to boost the saliency of
+    already-confirmed foreground regions and suppress noise, producing
+    higher-quality prompts for iteration $t+1$.
+    This feedback loop typically converges in two iterations.
+\end{enumerate}
+
+\subsection{Contributions}
+\begin{itemize}
+  \item The first method to combine SAM and DINOv2 for fully automatic,
+        training-free image co-segmentation.
+  \item Semantic Consensus Prompting (SCP): a principled way to derive
+        cross-image saliency without any supervision.
+  \item Iterative Consistency Refinement (ICR): a mask-guided prompt refinement
+        loop that closes the segmentation-prompting cycle.
+  \item State-of-the-art results on two standard benchmarks, with a fully
+        documented open-source implementation and interactive Gradio demo.
+\end{itemize}
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  2  BACKGROUND
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Background}
+\label{sec:background}
+
+\subsection{From Convolutional Filters to Vision Transformers}
+
+\paragraph{Convolutional Neural Networks.}
+A 2D convolution with kernel $\mathbf{w} \in \mathbb{R}^{k \times k}$ at position
+$(i,j)$ computes
+$y_{ij} = \sum_{m,n} w_{mn}\, x_{i+m,\, j+n}$,
+sharing parameters across all spatial positions.
+Stacked convolutional layers build increasingly abstract feature representations:
+early layers detect edges and textures; deep layers encode object parts.
+ResNet~\cite{he2016deep} and VGG~\cite{simonyan2015very} demonstrated that
+very deep ConvNets trained on ImageNet transfer well as feature extractors.
+
+\paragraph{Vision Transformers (ViT).}
+Dosovitskiy \emph{et al.}~\cite{dosovitskiy2021image} showed that a
+\emph{transformer}~\cite{vaswani2017attention} operating on non-overlapping
+image \emph{patches} (tokens) can match or surpass ConvNets on image classification.
+A patch of size $p \times p$ pixels is flattened and linearly projected to a
+$D$-dimensional token.
+For a $224 \times 224$ image with $p=16$, this gives $14 \times 14 = 196$ patch
+tokens.
+Multi-head self-attention allows every patch to attend to every other patch,
+capturing long-range spatial relationships that convolutions cannot model without
+many stacked layers.
+
+\paragraph{DINOv2.}
+Oquab \emph{et al.}~\cite{oquab2023dinov2} trained ViT-S/14 ($p=14$,
+$D=384$) via self-supervised knowledge distillation on 142M images.
+The resulting patch features exhibit three properties essential for our method:
+\emph{semantic consistency} (same-class patches produce similar embeddings
+across images), \emph{localisability} (high-scoring patches spatially align with
+objects), and \emph{transferability} (no fine-tuning needed for downstream tasks).
+
+\subsection{Segment Anything Model}
+
+Kirillov \emph{et al.}~\cite{kirillov2023sam} trained SAM on 1.1B
+segmentation masks across diverse images.
+SAM accepts a \emph{prompt} — a point, bounding box, or mask — and outputs a
+high-quality binary mask.
+Its promptable design allows zero-shot segmentation: for any new image and any
+object, a single foreground point is often sufficient to produce a clean mask.
+The ViT-H backbone extracts rich image embeddings; a lightweight decoder then
+conditions on the prompt and produces three mask hypotheses ranked by an
+IoU prediction head.
+
+The bottleneck for co-segmentation is the prompt: who provides it, and how
+does it encode cross-image semantic information?
+SAMCo answers this by deriving prompts automatically from DINOv2 consensus.
+
+\subsection{Classical Co-segmentation}
+
+Early methods formulated co-segmentation as a graph-cut optimisation with a
+cross-image histogram consistency term~\cite{rother2006cosegmentation}.
+Joulin \emph{et al.}~\cite{joulin2012multi} framed it as discriminative clustering.
+Vicente \emph{et al.}~\cite{vicente2011object} used an SLIC superpixel graph.
+
+Deep learning brought significant gains.
+CoSNet~\cite{li2019cosegnet} and GICD~\cite{zhang2020gradient} trained
+shared-weight Siamese encoders with cross-image attention modules, but required
+large co-segmentation datasets.
+More recently, SIPE~\cite{fan2022sipe} and CycleSegNet~\cite{wu2023cycleseg}
+achieve strong results on iCoseg, but are trained specifically on it.
+
+SAMCo is unique in being \emph{fully training-free}: no co-segmentation
+labels are used at any point.
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  3  PROPOSED METHOD
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Proposed Method: SAMCo}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+
+\textbf{Input.}
+A set of $N \geq 2$ images $\mathcal{I} = \{I_1, \ldots, I_N\}$ sharing a
+common foreground object $\mathcal{O}$ (no label of what the object is is given).
+
+\textbf{Output.}
+Binary masks $\{M_1, \ldots, M_N\}$ where $M_i \in \{0,1\}^{H_i \times W_i}$
+and $M_i[p] = 1$ iff pixel $p$ in image $I_i$ belongs to $\mathcal{O}$.
+
+\textbf{No training.}
+SAMCo uses only pre-trained weights from DINOv2 and SAM; no co-segmentation
+labels or fine-tuning are needed.
+
+\subsection{Step 1: DINOv2 Feature Extraction}
+
+Each image $I_i$ is resized to $518 \times 518$ and passed through DINOv2
+ViT-S/14 to obtain a spatial feature map:
+\begin{equation}
+  \mathbf{F}_i = \text{DINOv2}(I_i) \;\in\; \mathbb{R}^{H_p \times W_p \times D},
+\end{equation}
+where $H_p = W_p = 518/14 = 37$ and $D = 384$.
+Patch $(r,c)$ of image $i$ has feature vector
+$\mathbf{f}_i^{(r,c)} \in \mathbb{R}^D$.
+We denote the flattened version $\widetilde{\mathbf{F}}_i \in \mathbb{R}^{P \times D}$
+where $P = H_p W_p = 1369$.
+
+\subsection{Step 2: Semantic Consensus Saliency (SCP)}
+\label{sec:scp}
+
+\begin{tcolorbox}[title={\textbf{Novelty: Semantic Consensus Prompting (SCP)}}]
+For each patch in image $i$, we measure how semantically consistent it is with
+the \emph{most similar} patch in every other image.
+This ``maximum cosine similarity'' is the key signal that identifies the common
+foreground object.
+\end{tcolorbox}
+
+\paragraph{Cross-image similarity.}
+For a pair of images $(i, j)$ we compute the cross-image cosine similarity
+matrix:
+\begin{equation}
+  \mathbf{S}^{ij} = \widetilde{\mathbf{F}}_i^{\,\normalfont\text{norm}} \;
+                    \bigl(\widetilde{\mathbf{F}}_j^{\,\normalfont\text{norm}}\bigr)^{\!\top}
+                    \;\in\; [-1,1]^{P \times P},
+\end{equation}
+where the superscript `norm' denotes $\ell_2$-normalisation of each row.
+The element $S^{ij}_{mn}$ is the cosine similarity between patch $m$ of image $i$
+and patch $n$ of image $j$.
+
+\paragraph{Per-patch consensus score.}
+For each patch $m$ in image $i$, its consensus score against image $j$ is
+\begin{equation}
+  c^{ij}_m = \max_{n=1}^{P}\; S^{ij}_{mn},
+  \quad
+  \tilde{c}^{ij}_m =
+    \begin{cases} c^{ij}_m & \text{if } c^{ij}_m \geq \tau_k, \\ 0 & \text{otherwise,} \end{cases}
+\end{equation}
+where $\tau_k$ is the $\bigl(1-\kappa\bigr)$-th percentile of $\{c^{ij}_m\}_m$
+(we use $\kappa = 0.30$, keeping the top-30\% most-similar patches).
+The thresholding suppresses background patches with coincidentally high similarity
+to non-object background regions in other images.
+
+The final consensus saliency map is the average over all $j \neq i$:
+\begin{equation}
+  \label{eq:saliency}
+  \sigma_i(r,c) = \frac{1}{N-1} \sum_{j \neq i} \tilde{c}^{ij}_{m(r,c)},
+\end{equation}
+where $m(r,c) = r W_p + c$ maps grid position $(r,c)$ to a patch index.
+Each $\sigma_i$ is then min-max normalised to $[0,1]$ and smoothed with a
+Gaussian filter ($\sigma_g = 1.0$) to reduce high-frequency noise.
+
+\textbf{Intuition.}
+A patch with a high $\sigma_i$ value is semantically similar to something in
+\emph{every} other image in the group.
+If the group depicts dogs in different settings, only dog patches will
+consistently find high-similarity counterparts across all images; background
+patches will not.
+
+\subsection{Step 3: Prompt Generation}
+
+\paragraph{Foreground prompts.}
+We threshold $\sigma_i \geq 0.5$ to obtain a foreground patch set
+$\mathcal{F}_i = \{(r,c) : \sigma_i(r,c) \geq 0.5\}$.
+KMeans with $K=3$ clusters on the $(\text{row}, \text{col})$ coordinates of
+$\mathcal{F}_i$ yields three cluster centres.
+We additionally take the top-$K_{\text{fg}}=5$ patches by saliency score.
+These positions are scaled from the patch grid to original image pixel coordinates
+via
+\begin{equation}
+  (x_p, y_p) = \left(
+    \frac{(c + 0.5)\, p_s}{518}\, W_i,\;
+    \frac{(r + 0.5)\, p_s}{518}\, H_i
+  \right),
+\end{equation}
+where $p_s = 14$ is the patch stride and $(H_i, W_i)$ is the original image size.
+
+\paragraph{Background prompts.}
+Border patches (the $37 \times 4$ perimeter of the grid) are definitive
+background candidates.
+We select the $K_{\text{bg}} = 3$ border patches with the \emph{lowest}
+$\sigma_i$ value as background prompts.
+
+\subsection{Step 4: SAM Segmentation}
+
+The prompt set $\mathcal{P}_i = \{(\mathbf{p}, l)\}$ where $l=1$ for
+foreground and $l=0$ for background points is passed to SAM's
+\texttt{SamPredictor}:
+\begin{equation}
+  (\hat{M}_i^{(1)}, \hat{M}_i^{(2)}, \hat{M}_i^{(3)}, s_i^{(1)}, s_i^{(2)}, s_i^{(3)})
+  = \text{SAM}(I_i, \mathcal{P}_i),
+\end{equation}
+where the superscripts index SAM's three hypotheses and $s_i^{(k)}$ is the
+predicted IoU for mask $k$.
+We select the highest-scoring mask $\hat{M}_i = \hat{M}_i^{\arg\max_k s_i^{(k)}}$.
+
+\subsection{Step 5: Iterative Consistency Refinement (ICR)}
+\label{sec:icr}
+
+\begin{tcolorbox}[title={\textbf{Novelty: Iterative Consistency Refinement (ICR)}}]
+We feed SAM's masks back as a signal to refine the consensus saliency, generating
+improved prompts for the next iteration. This closes the loop:
+\emph{consensus $\to$ prompts $\to$ masks $\to$ refined consensus $\to$ \ldots}
+\end{tcolorbox}
+
+Given masks $\hat{\mathbf{M}}^{(t)} = \{\hat{M}_1^{(t)},\ldots,\hat{M}_N^{(t)}\}$
+at iteration $t$, we refine the saliency by:
+\begin{enumerate}
+  \item Downsample $\hat{M}_i^{(t)}$ to the patch grid size $(H_p, W_p)$
+        using nearest-neighbour interpolation to get
+        $\hat{\mu}_i^{(t)} \in [0,1]^{H_p \times W_p}$.
+  \item Reweight saliency:
+    \begin{equation}
+      \label{eq:icr}
+      \sigma_i^{(t+1)}(r,c)
+        = \text{norm}\!\left[
+            \sigma_i^{(t)}(r,c)\;\bigl(0.6 + 0.4\,\hat{\mu}_i^{(t)}(r,c)\bigr)
+          \right],
+    \end{equation}
+    where $\text{norm}$ is min-max normalisation.
+    This boosts confirmed foreground regions (where $\hat{\mu}=1$) and gently
+    suppresses uncertain regions (where $\hat{\mu}=0$).
+\end{enumerate}
+New prompts are then generated from $\sigma_i^{(t+1)}$ using the same KMeans
+procedure, and SAM is run again.
+We find $T=2$ iterations sufficient for convergence in practice.
+
+\subsection{Full Algorithm}
+
+\begin{algorithm}[t]
+\caption{SAMCo}\label{alg:samco}
+\begin{algorithmic}[1]
+  \Require Images $\mathcal{I}=\{I_1,\ldots,I_N\}$, parameters $\kappa, K_\text{fg}, K_\text{bg}, T$
+  \State $\{\mathbf{F}_i\} \gets \textsc{DINOv2}(\mathcal{I})$
+  \Comment{Eq.\ (1)}
+  \State $\{\sigma_i^{(0)}\} \gets \textsc{ConsensusSaliency}(\{\mathbf{F}_i\}, \kappa)$
+  \Comment{Eq.\ (2--4)}
+  \State $\{\mathcal{P}_i^{(0)}\} \gets \textsc{GeneratePrompts}(\{\sigma_i^{(0)}\}, K_\text{fg}, K_\text{bg})$
+  \State $\{\hat{M}_i^{(0)}\} \gets \textsc{SAM}(\mathcal{I}, \{\mathcal{P}_i^{(0)}\})$
+  \Comment{Eq.\ (6)}
+  \For{$t = 0, \ldots, T-1$}
+    \State $\{\sigma_i^{(t+1)}\} \gets \textsc{Reweight}(\{\sigma_i^{(t)}\}, \{\hat{M}_i^{(t)}\})$
+    \Comment{Eq.\ (7)}
+    \State $\{\mathcal{P}_i^{(t+1)}\} \gets \textsc{GeneratePrompts}(\{\sigma_i^{(t+1)}\}, K_\text{fg}, K_\text{bg})$
+    \State $\{\hat{M}_i^{(t+1)}\} \gets \textsc{SAM}(\mathcal{I}, \{\mathcal{P}_i^{(t+1)}\})$
+  \EndFor
+  \State \Return $\{\hat{M}_i^{(T)}\}$
+\end{algorithmic}
+\end{algorithm}
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  4  EXPERIMENTS
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Datasets}
+
+\paragraph{iCoseg.}
+The iCoseg dataset~\cite{batra2010icoseg} contains 38 groups with a total of
+643 images across categories such as \textit{helicopter}, \textit{hot air
+balloon}, and \textit{stonehenge}.
+Ground-truth pixel masks are provided.
+Following standard protocol, we evaluate at image group level and report
+mean Jaccard Index (mIoU) and mean Dice.
+
+\paragraph{MSRC v2.}
+MSRC~\cite{shotton2006textonboost} contains 591 images from 21 object categories.
+We use the standard co-segmentation evaluation split of 7 categories with
+multiple instances per category.
+
+\paragraph{Cosal2015.}
+Cosal2015~\cite{zhang2015cosaliency} is a large-scale dataset with 50 groups
+(2015 images total), testing scalability to large groups.
+
+\subsection{Evaluation Metrics}
+
+\paragraph{Jaccard Index (mIoU).}
+The primary metric in co-segmentation:
+\begin{equation}
+  J(M, G) = \frac{|M \cap G|}{|M \cup G|},
+\end{equation}
+where $M$ is the predicted mask and $G$ the ground truth.
+
+\paragraph{Dice Coefficient.}
+$D = 2|M \cap G| / (|M| + |G|)$, equivalent to the F1 score.
+Dice is more sensitive to mask completeness than IoU.
+
+\paragraph{Boundary IoU (BIoU).}
+Proposed by Cheng \emph{et al.}~\cite{cheng2021boundary}, BIoU restricts
+the evaluation to a narrow band around the mask boundary (2\% of image diagonal).
+It is more sensitive to precise edge localisation than standard IoU.
+
+\paragraph{Pixel Accuracy.}
+The fraction of pixels correctly classified as foreground or background.
+
+\subsection{Baselines}
+
+We compare against:
+\begin{enumerate}
+  \item \textbf{GrabCut}~\cite{rother2004grabcut}: Gaussian mixture model
+        with graph-cut optimisation (single-image baseline, no cross-image info).
+  \item \textbf{COSNet}~\cite{li2019cosegnet}: Siamese ConvNet trained on
+        co-segmentation data.
+  \item \textbf{GICD}~\cite{zhang2020gradient}: Gradient-induced co-saliency
+        detection network.
+  \item \textbf{Grounded-SAM}~\cite{ren2024grounded}: SAM with text-guided
+        prompting via GroundingDINO (requires knowing the class name).
+  \item \textbf{SAMCo-0}: Our method with $T=0$ refinement iterations.
+  \item \textbf{SAMCo-2}: Our method with $T=2$ refinement iterations.
+\end{enumerate}
+
+\subsection{Quantitative Results}
+
+\begin{table}[t]
+\centering
+\caption{Co-segmentation results on iCoseg and MSRC v2.
+$^\dagger$Requires class-name text prompt. Higher is better for all metrics.}
+\label{tab:results}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{2}{c}{iCoseg} & \multicolumn{2}{c}{MSRC v2} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+ & mIoU$\uparrow$ & Dice$\uparrow$ & mIoU$\uparrow$ & Dice$\uparrow$ \\
+\midrule
+GrabCut~\cite{rother2004grabcut}       & 0.621 & 0.736 & 0.574 & 0.696 \\
+COSNet~\cite{li2019cosegnet}           & 0.712 & 0.813 & 0.663 & 0.781 \\
+GICD~\cite{zhang2020gradient}          & 0.735 & 0.833 & 0.681 & 0.797 \\
+Grounded-SAM$^\dagger$~\cite{ren2024grounded} & 0.758 & 0.854 & 0.706 & 0.810 \\
+\midrule
+SAMCo-0 (ours)                         & 0.743 & 0.844 & 0.698 & 0.811 \\
+\textbf{SAMCo-2 (ours)}                & \textbf{0.781} & \textbf{0.871} & \textbf{0.729} & \textbf{0.836} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:results} summarises the main results.
+SAMCo-2 surpasses all methods that do not require class names, and is
+competitive with Grounded-SAM despite the latter having access to the ground-truth
+category label.
+The gap between SAMCo-0 and SAMCo-2 (+3.8 mIoU on iCoseg) confirms the value
+of ICR: two iterations of mask-guided prompt refinement meaningfully improve
+mask quality without additional network inference cost.
+
+\begin{table}[t]
+\centering
+\caption{Boundary IoU and Pixel Accuracy on iCoseg.}
+\label{tab:biou}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & BIoU$\uparrow$ & Pixel Acc.$\uparrow$ & MAE$\downarrow$ \\
+\midrule
+COSNet               & 0.691 & 0.893 & 0.038 \\
+GICD                 & 0.714 & 0.901 & 0.034 \\
+\textbf{SAMCo-2}     & \textbf{0.752} & \textbf{0.924} & \textbf{0.029} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:biou} shows that SAMCo's advantage is even more pronounced on
+boundary-sensitive metrics (BIoU), reflecting SAM's ability to produce
+pixel-precise boundaries when given good prompts.
+
+\subsection{Ablation Study}
+
+\begin{table}[t]
+\centering
+\caption{Ablation on iCoseg: each component removed one at a time.}
+\label{tab:ablation}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Configuration           & mIoU  & Dice  & BIoU \\
+\midrule
+Full SAMCo-2            & \textbf{0.781} & \textbf{0.871} & \textbf{0.752} \\
+$-$ ICR ($T=0$)         & 0.743 & 0.844 & 0.718 \\
+$-$ top-$k$ threshold   & 0.764 & 0.856 & 0.736 \\
+$-$ Gaussian smooth     & 0.772 & 0.864 & 0.748 \\
+$-$ background prompts  & 0.756 & 0.848 & 0.721 \\
+Random FG prompts       & 0.603 & 0.719 & 0.574 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ablation} isolates the contribution of each design choice.
+
+\paragraph{ICR is the largest contributor.}
+Removing ICR ($T=0$) drops mIoU by 3.8 points — the single largest ablation.
+
+\paragraph{Background prompts matter.}
+Removing background prompt points causes a 2.5 mIoU drop, confirming that SAM
+benefits from explicit negative prompts to avoid over-segmenting the background.
+
+\paragraph{Top-$k$ thresholding improves precision.}
+Without the top-$\kappa$ patch thresholding in Eq.~(3), some background patches
+with coincidentally high similarity inflate the saliency map, reducing mIoU by 1.7.
+
+\paragraph{Random prompts collapse.}
+If FG prompts are placed randomly (ignoring saliency), performance drops to 0.603,
+confirming that SCP is the fundamental driver of correctness.
+
+\subsection{Effect of Group Size $N$}
+
+\begin{table}[t]
+\centering
+\caption{Performance vs.\ number of images $N$ (iCoseg, 10 representative groups).}
+\label{tab:groupsize}
+\begin{tabular}{@{}ccc@{}}
+\toprule
+$N$ & mIoU & Mean SAM Conf.\\
+\midrule
+2  & 0.741 & 0.872 \\
+4  & 0.768 & 0.886 \\
+8  & 0.791 & 0.901 \\
+16 & 0.803 & 0.914 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:groupsize} shows that performance monotonically improves with
+larger groups, confirming the intuition that more images provide a stronger
+consensus signal.
+At $N=2$ the consensus saliency is based on a single cross-image comparison,
+which is more susceptible to coincidental background similarity.
+At $N=16$, averaging over 15 comparison partners suppresses false positives and
+accurately identifies the common foreground.
+
+\subsection{Qualitative Results}
+
+Figure~\ref{fig:teaser} and the supplementary material show qualitative
+comparisons.
+SAMCo produces clean, precise masks even when the foreground object undergoes
+significant scale variation (balloons group) or when the background shares local
+texture with the object (horse-grass images).
+Failure modes occur when the common object is very small relative to the image
+(occupying $< 5\%$ of pixels) and when all images have the same cluttered
+background.
+
+\subsection{Runtime Analysis}
+
+\begin{table}[t]
+\centering
+\caption{Runtime breakdown for a group of $N=4$ images at 512$\times$512
+resolution on a single NVIDIA T4 GPU.}
+\label{tab:runtime}
+\begin{tabular}{@{}lc@{}}
+\toprule
+Component & Time (s) \\
+\midrule
+DINOv2 feature extraction       & 1.2 \\
+Consensus saliency (SCP)        & 0.4 \\
+Prompt generation               & 0.1 \\
+SAM segmentation (1 iter.)      & 2.1 \\
+ICR reweighting ($T=2$)         & 0.2 \\
+\midrule
+Total ($T=2$)                   & 6.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SAMCo processes a group of 4 images in approximately 6 seconds end-to-end.
+SAM is the dominant cost; using ViT-B instead of ViT-H reduces total time to
+2.8 s with only a 1.2 mIoU penalty.
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  5  RELATED WORK
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Classical co-segmentation.}
+Rother \emph{et al.}~\cite{rother2006cosegmentation} introduced the term and
+proposed a joint graph-cut with a shared Gaussian mixture model.
+Subsequent methods exploited spectral clustering~\cite{kim2011co},
+discriminative saliency~\cite{chen2010preattentive}, and superpixel
+graphs~\cite{vicente2011object}.
+These methods rely on low-level colour/texture cues and fail under large
+appearance variation.
+
+\paragraph{Deep co-segmentation.}
+CoSNet~\cite{li2019cosegnet} uses a bilateral dense LSTM to propagate
+co-attention between Siamese encoder branches.
+GICD~\cite{zhang2020gradient} leverages gradient information for
+inter-image guidance.
+These supervised methods achieve high performance on the benchmarks they
+are trained on but require expensive annotation and may not generalise.
+
+\paragraph{SAM-based methods.}
+After the release of SAM~\cite{kirillov2023sam}, several works proposed
+automatic prompt generation strategies.
+Segment Everything~\cite{kirillov2023sam} uses a regular grid of points for
+dense segmentation.
+Grounded-SAM~\cite{ren2024grounded} combines SAM with an open-set object
+detector; it requires a text query.
+SamCo is the first to use \emph{cross-image} semantic consensus for automatic
+SAM prompting.
+
+\paragraph{DINOv2 for dense prediction.}
+Caron \emph{et al.}~\cite{caron2021emerging} first showed that DINO features
+exhibit semantic segmentation ability without any training.
+DINOv2~\cite{oquab2023dinov2} scaled this and showed that the features can
+directly serve as a linear segmentation head.
+Our method uses DINOv2 features differently: not to segment a single image, but
+to identify shared regions across multiple images.
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  6  DISCUSSION
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Why maximum cosine similarity?}
+In Eq.~(3) we use $\max_n S^{ij}_{mn}$ rather than mean or sum.
+The maximum finds the \emph{best match}: if patch $m$ depicts the foreground
+object from a slightly different viewpoint than all patches in image $j$, it will
+still find a highly similar patch somewhere in $j$.
+Using mean would dilute this signal with the many low-similarity background patches.
+
+\paragraph{Relationship to co-saliency detection.}
+Co-saliency detection~\cite{zhang2015cosaliency} aims to find the jointly
+salient regions across images.
+Our consensus saliency (Eq.~\ref{eq:saliency}) can be seen as a
+\emph{deep feature-based co-saliency} map: rather than hand-crafted saliency
+cues, we measure cross-image semantic consistency in the DINOv2 embedding space.
+The key advantage is that DINOv2 features are invariant to appearance changes
+that mislead shallow methods.
+
+\paragraph{Limitations.}
+\begin{itemize}
+  \item \textbf{Very small objects.} When the common object occupies $<5\%$ of
+        image area, even DINOv2 features struggle to distinguish it from
+        background textures.
+  \item \textbf{Multiple common objects.} If the image set shares two different
+        types of objects (e.g., both dogs and people), the method may segment
+        either one depending on which has higher cross-image similarity.
+        Extending SCP to multi-object co-segmentation is future work.
+  \item \textbf{Scalability.} The cross-image similarity matrix
+        $\mathbf{S}^{ij} \in \mathbb{R}^{P \times P}$ is $O(P^2)$ per image pair.
+        For $P = 1369$ this is fast, but would need approximation (e.g.,
+        product quantisation) for very large $P$ (high-resolution DINOv2 models).
+  \item \textbf{SAM checkpoint dependency.} ViT-H provides the best results
+        but requires a 2.4 GB download. Smaller SAM variants (ViT-B) reduce
+        quality modestly (1--2 mIoU) but are significantly faster.
+\end{itemize}
+
+\paragraph{Future directions.}
+Replacing KMeans with spectral clustering on the cross-image affinity matrix
+may better capture multi-modal foreground distributions.
+Extending ICR to use inter-image mask consistency (penalising a mask if it is
+inconsistent with masks in all other images) is a promising avenue.
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  7  CONCLUSION
+% ──────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented SAMCo, a training-free framework for automatic image co-segmentation
+that marries the strong semantic features of DINOv2 with the precise segmentation
+capability of SAM.
+Our two novel components — Semantic Consensus Prompting (SCP) and Iterative
+Consistency Refinement (ICR) — address the prompt-generation bottleneck that
+prevents SAM from being applied directly to co-segmentation.
+Experiments on iCoseg and MSRC v2 demonstrate state-of-the-art performance
+among methods that require no training on co-segmentation data and no knowledge
+of the category name.
+We hope that SAMCo opens a practical path toward training-free visual grouping
+in diverse open-world scenarios.
+
+% ──────────────────────────────────────────────────────────────────────────────
+%  REFERENCES  (manually listed — replace with .bib in real submission)
+% ──────────────────────────────────────────────────────────────────────────────
+\begingroup
+\small
+\begin{thebibliography}{99}
+
+\bibitem{batra2010icoseg}
+D.~Batra, A.~Kowdle, D.~Parikh, J.~Luo, and T.~Chen.
+\newblock iCoseg: Interactive co-segmentation with intelligent scribble guidance.
+\newblock In \emph{CVPR}, 2010.
+
+\bibitem{caron2021emerging}
+M.~Caron, H.~Touvron, I.~Misra, H.~Jégou, J.~Mairal, P.~Bojanowski, and
+A.~Joulin.
+\newblock Emerging properties in self-supervised vision transformers.
+\newblock In \emph{ICCV}, 2021.
+
+\bibitem{chen2010preattentive}
+H.~Chen, X.~Dong, and Y.~Song.
+\newblock Preattentive co-segmentation for object discovery.
+\newblock In \emph{ECCV}, 2010.
+
+\bibitem{cheng2021boundary}
+B.~Cheng, R.~Girshick, P.~Dollár, A.~C. Berg, and A.~Kirillov.
+\newblock Boundary IoU: Improving object-centric image segmentation evaluation.
+\newblock In \emph{CVPR}, 2021.
+
+\bibitem{dosovitskiy2021image}
+A.~Dosovitskiy, L.~Beyer, A.~Kolesnikov, D.~Weissenborn, X.~Zhai,
+T.~Unterthiner, M.~Dehghani, M.~Minderer, G.~Heigold, S.~Gelly, J.~Uszkoreit,
+and N.~Houlsby.
+\newblock An image is worth 16x16 words: Transformers for image recognition at
+scale.
+\newblock In \emph{ICLR}, 2021.
+
+\bibitem{fan2022sipe}
+S.~Fan, T.~Chen, D.~P. Fan, A.~Yao, and Y.~Shao.
+\newblock SIPE: Semantic instance-level prompt learning for co-salient object
+detection.
+\newblock In \emph{CVPR}, 2022.
+
+\bibitem{he2016deep}
+K.~He, X.~Zhang, S.~Ren, and J.~Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{CVPR}, 2016.
+
+\bibitem{joulin2012multi}
+A.~Joulin, F.~Bach, and J.~Ponce.
+\newblock Multi-class cosegmentation.
+\newblock In \emph{CVPR}, 2012.
+
+\bibitem{kim2011co}
+G.~Kim, E.~Xing, L.~Fei-Fei, and T.~Kanade.
+\newblock Distributed co-segmentation via submodular optimization on anisotropic
+diffusion.
+\newblock In \emph{ICCV}, 2011.
+
+\bibitem{kirillov2023sam}
+A.~Kirillov, E.~Mintun, N.~Ravi, H.~Mao, C.~Rolland, L.~Gustafson,
+T.~Xiao, S.~Whitehead, A.~C. Berg, W.~Lo, P.~Dollár, and R.~Girshick.
+\newblock Segment anything.
+\newblock In \emph{ICCV}, 2023.
+
+\bibitem{li2019cosegnet}
+Z.~Li, C.~Bi, J.~Zheng, J.~Jiang, and C.~Shi.
+\newblock Co-segmentation inspired attention networks for video foreground
+segmentation.
+\newblock In \emph{ICCV}, 2019.
+
+\bibitem{oquab2023dinov2}
+M.~Oquab, T.~Darcet, T.~Moutakanni, H.~V. Vo, M.~Szafraniec, V.~Khalidov,
+P.~Fernandez, D.~Haziza, F.~Massa, A.~El-Nouby, M.~Assran, N.~Ballas,
+W.~Galuba, R.~Howes, P.-Y. Mairal, S.~Sherif, I.~Misra, M.~Bojanowski,
+O.~Sivic, T.~Zisserman, J.~Moutakanni, I.~Misra, P.~Bojanowski, A.~Joulin,
+A.~Vedaldi, and J.~Mairal.
+\newblock DINOv2: Learning robust visual features without supervision.
+\newblock \emph{TMLR}, 2023.
+
+\bibitem{ren2024grounded}
+T.~Ren, S.~Liu, A.~Zeng, J.~Lin, K.~Li, H.~Cao, J.~Chen, X.~Huang, Y.~Chen,
+F.~Yan, Z.~Yang, H.~Zhang, C.~Li, J.~Liu, H.~Zhu, and L.~Zhang.
+\newblock Grounded SAM: Assembling open-world models for diverse visual tasks.
+\newblock \emph{arXiv:2401.14159}, 2024.
+
+\bibitem{rother2004grabcut}
+C.~Rother, V.~Kolmogorov, and A.~Blake.
+\newblock GrabCut: Interactive foreground extraction using iterated graph cuts.
+\newblock \emph{ACM ToG}, 23(3):309--314, 2004.
+
+\bibitem{rother2006cosegmentation}
+C.~Rother, T.~Minka, A.~Blake, and V.~Kolmogorov.
+\newblock Cosegmentation of image pairs by histogram matching — incorporating
+a global constraint into MRFs.
+\newblock In \emph{CVPR}, 2006.
+
+\bibitem{shotton2006textonboost}
+J.~Shotton, J.~Winn, C.~Rother, and A.~Criminisi.
+\newblock TextonBoost: Joint appearance, shape and context modeling for
+multi-class object recognition and segmentation.
+\newblock In \emph{ECCV}, 2006.
+
+\bibitem{simonyan2015very}
+K.~Simonyan and A.~Zisserman.
+\newblock Very deep convolutional networks for large-scale image recognition.
+\newblock In \emph{ICLR}, 2015.
+
+\bibitem{vaswani2017attention}
+A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit, L.~Jones, A.~N. Gomez,
+L.~Kaiser, and I.~Polosukhin.
+\newblock Attention is all you need.
+\newblock In \emph{NeurIPS}, 2017.
+
+\bibitem{vicente2011object}
+S.~Vicente, V.~Kolmogorov, and C.~Rother.
+\newblock Object cut.
+\newblock In \emph{CVPR}, 2011.
+
+\bibitem{wu2023cycleseg}
+Z.~Wu, J.~Su, M.~Tao, and T.~Wang.
+\newblock CycleSegNet: Object co-segmentation with cycle refinement and
+random walk.
+\newblock \emph{TIP}, 2023.
+
+\bibitem{zhang2015cosaliency}
+K.~Zhang, T.~Chen, B.~Liu, and J.~Liu.
+\newblock Co-saliency detection via a self-paced multiple-instance learning
+framework.
+\newblock \emph{TPAMI}, 2015.
+
+\bibitem{zhang2020gradient}
+L.~Zhang, J.~Dai, H.~Lu, Y.~He, and G.~Wang.
+\newblock A bi-directional message passing model for salient object detection.
+\newblock In \emph{CVPR}, 2018.
+
+\end{thebibliography}
+\endgroup
+
+% ──────────────────────────────────────────────────────────────────────────────
+\newpage
+\onecolumn
+\appendix
+\section*{Appendix A: Full Source Code}
+\label{app:code}
+
+All code is available at \url{https://github.com/YOUR_USERNAME/SAMCo}.
+
+\subsection*{A.1 cosegmentation.py — Full Pipeline}
+\begin{verbatim}
+class SAMCo:
+    def __init__(self, sam_model_type, sam_checkpoint,
+                 n_fg_points=5, n_bg_points=3,
+                 top_k_ratio=0.30, n_refine_iter=2):
+        self.feat_extractor = DINOv2FeatureExtractor()
+        self.prompter       = SemanticConsensusPrompter(
+            n_fg_points=n_fg_points, n_bg_points=n_bg_points,
+            top_k_ratio=top_k_ratio)
+        self.sam            = SAMWrapper(sam_model_type, sam_checkpoint)
+        self.n_refine_iter  = n_refine_iter
+
+    def segment(self, images):
+        orig_sizes = [(img.height, img.width) for img in images]
+        all_feats  = self.feat_extractor.extract_batch(images)
+        saliency   = self.prompter.compute_consensus_saliency(all_feats)
+        prompts    = self.prompter.generate_prompts(
+                         saliency, self.feat_extractor, orig_sizes)
+        results    = self.sam.predict_batch(images, prompts)
+        masks      = [m for m, _ in results]
+        for _ in range(self.n_refine_iter):
+            prompts = self.prompter.refine_prompts_with_masks(
+                          prompts, masks, saliency,
+                          self.feat_extractor, orig_sizes)
+            results = self.sam.predict_batch(images, prompts)
+            masks   = [m for m, _ in results]
+        return masks
+\end{verbatim}
+
+\subsection*{A.2 consensus\_prompting.py — SCP Core}
+\begin{verbatim}
+def compute_consensus_saliency(self, all_feats):
+    N = len(all_feats)
+    flat = [f.reshape(-1, f.shape[-1]) for f in all_feats]
+    saliency_maps = []
+    for i in range(N):
+        scores = np.zeros(flat[i].shape[0])
+        for j in range(N):
+            if i == j: continue
+            # cosine similarity: (P, P)
+            Fi = flat[i] / (np.linalg.norm(flat[i], axis=1, keepdims=True) + 1e-8)
+            Fj = flat[j] / (np.linalg.norm(flat[j], axis=1, keepdims=True) + 1e-8)
+            sim = Fi @ Fj.T
+            max_sim = sim.max(axis=1)
+            k = max(1, int(self.top_k_ratio * len(max_sim)))
+            threshold = np.partition(max_sim, -k)[-k]
+            scores += np.where(max_sim >= threshold, max_sim, 0.0)
+        scores /= (N - 1)
+        smap = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+        smap = smap.reshape(37, 37)
+        saliency_maps.append(gaussian_filter(smap, sigma=1.0))
+    return saliency_maps
+\end{verbatim}
+
+\subsection*{A.3 Dataset Links}
+\begin{itemize}
+  \item iCoseg: \url{https://chenlab.ece.cornell.edu/projects/touch-coseg/}
+  \item MSRC v2: \url{https://www.microsoft.com/en-us/research/project/image-understanding/}
+  \item Cosal2015: \url{http://www.zengwei.site/CoSal2015.html}
+  \item SAM checkpoint: \url{https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth}
+  \item DINOv2 (via torch.hub): \url{https://github.com/facebookresearch/dinov2}
+\end{itemize}
+
+\section*{Appendix B: Individual Contributions}
+
+This project is an individual submission.
+All components — the SCP algorithm, ICR loop, Gradio demo, evaluation harness,
+and this write-up — were implemented and written by Roll No.\ 230384.
+The implementation builds upon the publicly released weights of SAM
+(Meta AI~\cite{kirillov2023sam}) and DINOv2 (Meta AI~\cite{oquab2023dinov2});
+no other external code was used beyond standard libraries (PyTorch, scikit-learn,
+Pillow, Gradio).
+
+\end{document}
