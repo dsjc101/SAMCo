@@ -100,6 +100,7 @@ python main.py \
   --visualize \
   --metrics
 ```
+If you run `python main.py` without `--images`, it will prompt you interactively to enter image paths one by one.
 
 Output files are saved to the folder you specify:
 
@@ -165,40 +166,40 @@ Results are saved as a JSON file at `results/results_icoseg.json` containing per
 Supported dataset flags: `--dataset icoseg`, `--dataset msrc`, `--dataset cosal2015`.
 
 Download links for the datasets:
-- iCoseg: https://chenlab.ece.cornell.edu/projects/touch-coseg/
+- iCoseg: https://ieeexplore.ieee.org/document/5540080
 - MSRC v2: https://www.microsoft.com/en-us/research/project/image-understanding/
-- Cosal2015: http://www.zengwei.site/CoSal2015.html
+- Cosal2015: https://ieeexplore.ieee.org/document/6548102
 
 ---
 
 ## Project File Structure
-
 ```
 SAMCo/
 |
-|-- main.py
-|-- evaluate.py
+|-- main.py                     entry point for CLI usage
+|-- evaluate.py                 benchmarking against ground truth datasets
 |-- requirements.txt
 |-- README.md
 |
 |-- models/
-|   |-- cosegmentation.py
-|   |-- consensus_prompting.py
-|   |-- feature_extractor.py
-|   |-- sam_wrapper.py
+|   |-- cosegmentation.py       top-level SAMCo pipeline class
+|   |-- consensus_prompting.py  core novel module: SCP + iterative refinement
+|   |-- feature_extractor.py    DINOv2 ViT-S/14 wrapper
+|   |-- sam_wrapper.py          SAM predictor wrapper
 |
 |-- utils/
-|   |-- metrics.py
-|   |-- visualization.py
+|   |-- metrics.py              IoU, Dice, BIoU, and all plotting utilities
+|   |-- visualization.py        overlays, grids, saliency heatmaps
 |
 |-- demo/
-|   |-- app.py
+|   |-- app.py                  Gradio web interface
 |
 |-- output/
-    |-- masks/
-    |-- overlays/
+    |-- masks/                  binary masks per image
+    |-- overlays/               mask-blended original images
+    |-- plots/                  metric and saliency plots
+    |-- results_grid.png        side-by-side comparison grid
 ```
-
 ---
 
 ## File-by-File Explanation
