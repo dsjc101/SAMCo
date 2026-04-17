@@ -1,6 +1,6 @@
 """
 sam_wrapper.py
---------------
+
 Thin wrapper around Meta's Segment Anything Model (SAM).
 
 We use SAM-ViT-H (the largest variant) for best quality,
@@ -16,9 +16,7 @@ from typing import Dict, Tuple, List, Optional
 import torch
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Checkpoint URLs / paths
-# ──────────────────────────────────────────────────────────────────────────────
+# Checkpoint filenames and their download URLs (for reference)
 SAM_CHECKPOINTS = {
     "vit_h": "sam_vit_h_4b8939.pth",   # ~2.4 GB — best quality
     "vit_l": "sam_vit_l_0b3195.pth",   # ~1.2 GB — good balance
@@ -39,7 +37,7 @@ class SAMWrapper:
     Usage
     -----
         sam = SAMWrapper(model_type="vit_h", checkpoint_path="sam_vit_h_4b8939.pth")
-        mask = sam.predict_with_points(image, fg_points, bg_points)
+        mask, score = sam.predict_with_points(image, fg_points, bg_points)
     """
 
     def __init__(
@@ -57,17 +55,18 @@ class SAMWrapper:
         self.device = device
         print("[SAM] Model loaded.")
 
-    # ------------------------------------------------------------------ #
-
     def predict_with_points(
         self,
-        image:     Image.Image,
-        fg_points: np.ndarray,          # (K, 2)  (x, y) pixel coords
-        bg_points: Optional[np.ndarray] = None,   # (M, 2)
+        image:            Image.Image,
+        fg_points:        np.ndarray,                    # (K, 2)  (x, y) pixel coords
+        bg_points:        Optional[np.ndarray] = None,   # (M, 2)
         multimask_output: bool = True,
     ) -> Tuple[np.ndarray, float]:
         """
         Run SAM with foreground and (optionally) background point prompts.
+
+        SAM's multimask mode produces 3 candidate masks per call, each with
+        a confidence score. We pick the one with the highest score.
 
         Args:
             image:            PIL.Image.Image (RGB)
@@ -82,13 +81,14 @@ class SAMWrapper:
         img_np = np.array(image.convert("RGB"))
         self.predictor.set_image(img_np)
 
-        # Build point_coords and point_labels arrays
+        # SAM uses a single point_coords array with a parallel label array:
+        # label 1 = foreground, label 0 = background
         all_points = list(fg_points)
-        all_labels = [1] * len(fg_points)          # 1 = foreground
+        all_labels = [1] * len(fg_points)
 
         if bg_points is not None and len(bg_points) > 0:
             all_points += list(bg_points)
-            all_labels += [0] * len(bg_points)     # 0 = background
+            all_labels += [0] * len(bg_points)
 
         point_coords = np.array(all_points, dtype=np.float32)
         point_labels = np.array(all_labels, dtype=np.int32)
@@ -99,15 +99,13 @@ class SAMWrapper:
             multimask_output=multimask_output,
         )
         # masks:  (num_masks, H, W) bool
-        # scores: (num_masks,)   confidence
+        # scores: (num_masks,)
 
         best_idx   = int(np.argmax(scores))
-        best_mask  = masks[best_idx]    # (H, W) bool
+        best_mask  = masks[best_idx]
         best_score = float(scores[best_idx])
 
         return best_mask, best_score
-
-    # ------------------------------------------------------------------ #
 
     def predict_batch(
         self,
