@@ -1,16 +1,15 @@
 """
 cosegmentation.py
------------------
+
 Full SAMCo Co-segmentation Pipeline
--------------------------------------
 
 Ties together:
   1. DINOv2FeatureExtractor    — dense patch features
-  2. SemanticConsensusPrompter — cross-image consensus → SAM prompts  ★ NOVEL ★
+  2. SemanticConsensusPrompter — cross-image consensus -> SAM prompts  (novel)
   3. SAMWrapper                — precision segmentation masks
-  4. Iterative Refinement      — mask-guided prompt improvement        ★ NOVEL ★
+  4. Iterative Refinement      — mask-guided prompt improvement        (novel)
 
-Input : N images sharing a common foreground object (any number N ≥ 2)
+Input : N images sharing a common foreground object (any number N >= 2)
 Output: N binary segmentation masks isolating the common object
 """
 
@@ -29,14 +28,14 @@ class SAMCo:
     SAMCo: Automatic Co-segmentation via Semantic Consensus Prompting.
 
     Parameters
-    ----------
+    
     sam_model_type  : SAM variant — 'vit_h' | 'vit_l' | 'vit_b'
     sam_checkpoint  : path to SAM .pth checkpoint file
     n_fg_points     : foreground prompt points per image
     n_bg_points     : background prompt points per image
     top_k_ratio     : fraction of cross-image patches used for consensus
     n_refine_iter   : iterations of mask-guided prompt refinement (0 = no refine)
-    device          : 'cuda' or 'cpu'
+    device          : 'cuda', 'cpu', or 'auto'
     """
 
     def __init__(
@@ -53,7 +52,7 @@ class SAMCo:
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # ── Sub-modules ──────────────────────────────────────────────
+        # Initialise all three sub-modules
         self.feat_extractor = DINOv2FeatureExtractor(device=device)
         self.prompter       = SemanticConsensusPrompter(
             n_fg_points   = n_fg_points,
@@ -68,18 +67,16 @@ class SAMCo:
         )
         self.n_refine_iter  = n_refine_iter
 
-    # ------------------------------------------------------------------ #
-
     def segment(
         self,
-        images: List[Image.Image],
+        images:  List[Image.Image],
         verbose: bool = True,
     ) -> List[np.ndarray]:
         """
         Run the full SAMCo pipeline on a list of co-segmentation images.
 
         Args:
-            images:  list of PIL.Image.Image (RGB), N ≥ 2
+            images:  list of PIL.Image.Image (RGB), N >= 2
             verbose: print progress messages
 
         Returns:
@@ -89,31 +86,27 @@ class SAMCo:
 
         orig_sizes = [(img.height, img.width) for img in images]
 
-        # ── Step 1: Extract DINOv2 patch features ────────────────────
         if verbose:
             print("[SAMCo] Step 1/4 — Extracting DINOv2 patch features ...")
         all_feats = self.feat_extractor.extract_batch(images)
 
-        # ── Step 2: Compute consensus saliency maps ───────────────────
         if verbose:
             print("[SAMCo] Step 2/4 — Computing cross-image consensus saliency ...")
         saliency_maps = self.prompter.compute_consensus_saliency(all_feats)
 
-        # ── Step 3: Generate initial SAM prompts ─────────────────────
         if verbose:
             print("[SAMCo] Step 3/4 — Generating Semantic Consensus Prompts ...")
         prompts = self.prompter.generate_prompts(
             saliency_maps, self.feat_extractor, orig_sizes
         )
 
-        # ── Step 4: SAM forward pass ──────────────────────────────────
         if verbose:
             print("[SAMCo] Step 4/4 — Running SAM segmentation ...")
         results = self.sam.predict_batch(images, prompts)
-        masks   = [mask for (mask, _) in results]
+        masks   = [mask  for (mask, _)  in results]
         scores  = [score for (_, score) in results]
 
-        # ── Step 5: Iterative Consistency Refinement ★ NOVEL ★ ───────
+        # Iterative refinement: reweight saliency using current masks, then re-prompt
         for iteration in range(self.n_refine_iter):
             if verbose:
                 print(f"[SAMCo] Refinement iteration {iteration + 1}/{self.n_refine_iter} ...")
@@ -122,7 +115,7 @@ class SAMCo:
                 self.feat_extractor, orig_sizes
             )
             results = self.sam.predict_batch(images, prompts)
-            masks   = [mask for (mask, _) in results]
+            masks   = [mask  for (mask, _)  in results]
             scores  = [score for (_, score) in results]
 
         if verbose:
@@ -130,8 +123,6 @@ class SAMCo:
             print(f"[SAMCo] Done. Average SAM confidence: {avg_score:.3f}")
 
         return masks
-
-    # ------------------------------------------------------------------ #
 
     def segment_from_paths(
         self,
