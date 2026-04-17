@@ -1,3 +1,4 @@
+
 """
 app.py
 ------
@@ -36,9 +37,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import io
 
-# ─────────────────────────────────────────────────────────────────────────────
 #  Global model (loaded once)
-# ─────────────────────────────────────────────────────────────────────────────
 _model: SAMCo = None
 
 
@@ -63,10 +62,7 @@ def _fig_to_np(fig) -> np.ndarray:
     plt.close(fig)
     return np.array(img)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Core inference
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_cosegmentation(
     image_list,          # list[np.ndarray]  — from gr.State
@@ -111,9 +107,9 @@ def run_cosegmentation(
             scores  = [s for _, s in results]
 
     except Exception as e:
-        return ([], [], [], None, None, None, None, None, f"❌ Error: {str(e)}")
+        return ([], [], [], None, None, None, None, None, f" Error: {str(e)}")
 
-    # ── Build visualisation outputs ───────────────────────────────────
+    # Build visualisation outputs
     overlays, saliencies, prompt_imgs = [], [], []
     for img, mask, smap, prompt in zip(images, masks, saliency_maps, prompts):
         overlays.append(np.array(overlay_mask_on_image(img, mask, color=(50, 220, 80), alpha=0.45)))
@@ -121,7 +117,7 @@ def run_cosegmentation(
         saliencies.append(np.array(blended))
         prompt_imgs.append(np.array(draw_points_on_image(img, prompt["fg_points"], prompt.get("bg_points"))))
 
-    # ── Metric plots ──────────────────────────────────────────────────
+    # Metric plots
     stats = mask_statistics(masks)
     group = evaluate_group(masks)   # no GT in demo
 
@@ -135,7 +131,7 @@ def run_cosegmentation(
     metric_cov  = _fig_to_np(fig_cov)
     metric_pair = _fig_to_np(fig_pair)
 
-    status = (f"✅ Done!  {N} images co-segmented. "
+    status = (f" Done!  {N} images co-segmented. "
               f"Mean coverage: {stats['mean_coverage']*100:.1f}%  |  "
               f"Mean pairwise Dice: {stats['mean_pairwise_dice']:.3f}  |  "
               f"Mean SAM confidence: {np.mean(scores):.3f}")
@@ -144,10 +140,7 @@ def run_cosegmentation(
             metric_conf, metric_sal, metric_cov, metric_pair,
             status)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Dynamic image state helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def add_image(image_list, new_img):
     """Append a newly uploaded image to the state list."""
@@ -170,10 +163,7 @@ def clear_images():
     """Clear all uploaded images."""
     return [], []
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  Build Gradio UI
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_ui(sam_checkpoint: str, sam_model_type: str) -> gr.Blocks:
 
@@ -206,21 +196,18 @@ def build_ui(sam_checkpoint: str, sam_model_type: str) -> gr.Blocks:
         </div>
         """)
 
-        # ── State: list of uploaded images ──────────────────────────
+        # State: list of uploaded images 
         image_state = gr.State([])   # List[np.ndarray]
 
         with gr.Tabs():
-
-            # ════════════════════════════════════════════════════════
             #  TAB 1 — Input & Results
-            # ════════════════════════════════════════════════════════
-            with gr.Tab("🖼️ Co-segmentation"):
+            with gr.Tab("Co-segmentation"):
                 with gr.Row():
 
-                    # ── Left column: image management ───────────────
+                    # Left column: image management 
                     with gr.Column(scale=1, min_width=320):
 
-                        gr.Markdown("### 📤 Upload Images")
+                        gr.Markdown(" Upload Images")
                         gr.Markdown(
                             "_Add at least 2 images. Click **＋ Add Image** to upload more._"
                         )
@@ -244,7 +231,7 @@ def build_ui(sam_checkpoint: str, sam_model_type: str) -> gr.Blocks:
                             clear_btn  = gr.Button("🗑️  Clear All", variant="stop", size="sm")
 
                         gr.Markdown("---")
-                        gr.Markdown("### ⚙️ Pipeline Parameters")
+                        gr.Markdown(" ⚙️ Pipeline Parameters")
                         n_fg   = gr.Slider(1, 10, value=5, step=1,    label="Foreground Prompt Points")
                         n_bg   = gr.Slider(1, 6,  value=3, step=1,    label="Background Prompt Points")
                         top_k  = gr.Slider(0.1, 0.7, value=0.3, step=0.05, label="Top-K Consensus Ratio")
@@ -253,36 +240,34 @@ def build_ui(sam_checkpoint: str, sam_model_type: str) -> gr.Blocks:
                         sam_ckpt_st  = gr.State(sam_checkpoint)
                         sam_type_st  = gr.State(sam_model_type)
 
-                        run_btn = gr.Button("🚀  Run SAMCo", variant="primary", size="lg")
+                        run_btn = gr.Button("  Run SAMCo", variant="primary", size="lg")
 
-                    # ── Right column: results ────────────────────────
+                    # Right column: results
                     with gr.Column(scale=2):
                         status_box = gr.Textbox(label="Status", interactive=False)
 
                         with gr.Tabs():
-                            with gr.Tab("🎯 Segmentation Masks"):
+                            with gr.Tab(" Segmentation Masks"):
                                 mask_gallery = gr.Gallery(
                                     label="Mask Overlays (green = common object)",
                                     columns=3, rows=2, height=420,
                                     object_fit="contain",
                                 )
-                            with gr.Tab("🔥 Saliency Maps"):
+                            with gr.Tab("Saliency Maps"):
                                 sal_gallery = gr.Gallery(
                                     label="Consensus Saliency (red = high consensus)",
                                     columns=3, rows=2, height=420,
                                     object_fit="contain",
                                 )
-                            with gr.Tab("📍 Prompt Points"):
+                            with gr.Tab(" Prompt Points"):
                                 prompt_gallery = gr.Gallery(
                                     label="Auto-generated Prompts (green=FG, red=BG)",
                                     columns=3, rows=2, height=420,
                                     object_fit="contain",
                                 )
 
-            # ════════════════════════════════════════════════════════
             #  TAB 2 — Metrics & Analytics
-            # ════════════════════════════════════════════════════════
-            with gr.Tab("📊 Metrics & Analytics"):
+            with gr.Tab(" Metrics & Analytics"):
                 gr.Markdown(
                     "### Analysis plots generated after running SAMCo\n"
                     "_Run the pipeline first, then switch to this tab._"
@@ -301,9 +286,7 @@ def build_ui(sam_checkpoint: str, sam_model_type: str) -> gr.Blocks:
 > - **Pairwise Mask Similarity (Dice)**: how consistent the co-segmentation masks are with each other
                 """)
 
-            # ════════════════════════════════════════════════════════
             #  TAB 3 — How It Works
-            # ════════════════════════════════════════════════════════
             with gr.Tab("ℹ️ How It Works"):
                 gr.Markdown("""
 ## SAMCo Pipeline
@@ -338,10 +321,7 @@ suppress false positives) and re-generate prompts. This loop typically runs 2 ti
 measurably improves mask quality.
                 """)
 
-        # ──────────────────────────────────────────────────────────
         #  Event wiring
-        # ──────────────────────────────────────────────────────────
-
         def upload_and_update(file, current_list):
             if file is None:
                 return current_list, current_list
@@ -374,9 +354,7 @@ measurably improves mask quality.
     return demo
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser()
